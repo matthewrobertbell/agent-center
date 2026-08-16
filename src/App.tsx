@@ -774,7 +774,7 @@ export default function App() {
       }
     };
     void refresh();
-    const interval = window.setInterval(() => void refresh(), 2_000);
+    const interval = window.setInterval(() => void refresh(), 10_000);
     return () => {
       disposed = true;
       window.clearInterval(interval);

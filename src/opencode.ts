@@ -80,21 +80,67 @@ function withoutDirectory(connection: OpenCodeConnection) {
     : connection;
 }
 
-export async function listSessions(connection: OpenCodeConnection): Promise<Session[]> {
-  const response = await withoutDirectory(connection).client.session.list({ throwOnError: true });
+async function listProjects(connection: OpenCodeConnection) {
+  const response = await withoutDirectory(connection).client.project.list({ throwOnError: true });
+  return response.data.filter((project) => project.id !== "global" && project.worktree !== "/");
+}
+
+async function listSessionsForDirectory(connection: OpenCodeConnection, directory: string): Promise<Session[]> {
+  const scoped = createConnection({ ...connection.options, directory });
+  const response = await scoped.client.session.list({
+    query: { directory },
+    throwOnError: true,
+  });
   return response.data;
 }
 
+export async function listSessions(connection: OpenCodeConnection): Promise<Session[]> {
+  let projectDirectories: string[];
+  try {
+    projectDirectories = (await listProjects(connection)).map((project) => project.worktree);
+  } catch {
+    projectDirectories = [];
+  }
+
+  const directories = Array.from(new Set([
+    connection.options.directory,
+    ...projectDirectories,
+  ].filter((directory): directory is string => Boolean(directory?.trim()))));
+
+  if (directories.length === 0) {
+    const response = await connection.client.session.list({
+      query: { directory: connection.options.directory || undefined },
+      throwOnError: true,
+    });
+    return response.data.sort((a, b) => b.time.updated - a.time.updated);
+  }
+
+  const results = await Promise.allSettled(
+    directories.map((directory) => listSessionsForDirectory(connection, directory)),
+  );
+  const sessions = new Map<string, Session>();
+  results.forEach((result) => {
+    if (result.status === "fulfilled") {
+      result.value.forEach((session) => sessions.set(session.id, session));
+    }
+  });
+
+  if (sessions.size === 0 && results.every((result) => result.status === "rejected")) {
+    throw results[0].reason;
+  }
+
+  return Array.from(sessions.values()).sort((a, b) => b.time.updated - a.time.updated);
+}
+
 export async function listRecentProjectDirectories(connection: OpenCodeConnection): Promise<string[]> {
-  const unscoped = withoutDirectory(connection);
   const [sessionsResult, projectsResult] = await Promise.allSettled([
-    unscoped.client.session.list({ throwOnError: true }),
-    unscoped.client.project.list({ throwOnError: true }),
+    listSessions(connection),
+    listProjects(connection),
   ]);
   const latestByDirectory = new Map<string, number>();
 
   if (sessionsResult.status === "fulfilled") {
-    sessionsResult.value.data.forEach((session) => {
+    sessionsResult.value.forEach((session) => {
       latestByDirectory.set(
         session.directory,
         Math.max(latestByDirectory.get(session.directory) || 0, session.time.updated),
@@ -103,13 +149,11 @@ export async function listRecentProjectDirectories(connection: OpenCodeConnectio
   }
 
   if (projectsResult.status === "fulfilled") {
-    projectsResult.value.data
-      .filter((project) => project.id !== "global" && project.worktree !== "/")
-      .forEach((project) => {
-        const time = project.time as typeof project.time & { updated?: number };
-        const activity = time.updated || time.initialized || time.created;
-        latestByDirectory.set(project.worktree, Math.max(latestByDirectory.get(project.worktree) || 0, activity));
-      });
+    projectsResult.value.forEach((project) => {
+      const time = project.time as typeof project.time & { updated?: number };
+      const activity = time.updated || time.initialized || time.created;
+      latestByDirectory.set(project.worktree, Math.max(latestByDirectory.get(project.worktree) || 0, activity));
+    });
   }
 
   if (connection.options.directory && !latestByDirectory.has(connection.options.directory)) {
