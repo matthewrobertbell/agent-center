@@ -1,7 +1,7 @@
 {
   "name": "react-agent-center",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A compact browser client for software-development agents running on OpenCode.",
   "license": "MIT",
   "type": "module",

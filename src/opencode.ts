@@ -86,21 +86,39 @@ export async function listSessions(connection: OpenCodeConnection): Promise<Sess
 }
 
 export async function listRecentProjectDirectories(connection: OpenCodeConnection): Promise<string[]> {
-  try {
-    const response = await withoutDirectory(connection).client.session.list({ throwOnError: true });
-    const latestByDirectory = new Map<string, number>();
-    response.data.forEach((session) => {
+  const unscoped = withoutDirectory(connection);
+  const [sessionsResult, projectsResult] = await Promise.allSettled([
+    unscoped.client.session.list({ throwOnError: true }),
+    unscoped.client.project.list({ throwOnError: true }),
+  ]);
+  const latestByDirectory = new Map<string, number>();
+
+  if (sessionsResult.status === "fulfilled") {
+    sessionsResult.value.data.forEach((session) => {
       latestByDirectory.set(
         session.directory,
         Math.max(latestByDirectory.get(session.directory) || 0, session.time.updated),
       );
     });
-    return Array.from(latestByDirectory.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([directory]) => directory);
-  } catch {
-    return connection.options.directory ? [connection.options.directory] : [];
   }
+
+  if (projectsResult.status === "fulfilled") {
+    projectsResult.value.data
+      .filter((project) => project.id !== "global" && project.worktree !== "/")
+      .forEach((project) => {
+        const time = project.time as typeof project.time & { updated?: number };
+        const activity = time.updated || time.initialized || time.created;
+        latestByDirectory.set(project.worktree, Math.max(latestByDirectory.get(project.worktree) || 0, activity));
+      });
+  }
+
+  if (connection.options.directory && !latestByDirectory.has(connection.options.directory)) {
+    latestByDirectory.set(connection.options.directory, Date.now());
+  }
+
+  return Array.from(latestByDirectory.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([directory]) => directory);
 }
 
 export async function listSessionStatuses(

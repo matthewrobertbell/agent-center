@@ -970,19 +970,29 @@ export default function App() {
       const taskConnection = connection.options.directory === targetDirectory
         ? connection
         : createConnection({ ...connection.options, directory: targetDirectory });
-      const [session, nextAgents, nextModels, recentSuccessfulModel] = await Promise.all([
-        createSession(taskConnection, targetDirectory),
+      const session = await createSession(taskConnection, targetDirectory);
+      activeSessionIDRef.current = session.id;
+      setConnection(taskConnection);
+      setDirectory(targetDirectory);
+      setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
+      setMessages((current) => ({ ...current, [session.id]: [] }));
+      setActiveID(session.id);
+      setRecentDirectories((current) => [targetDirectory, ...current.filter((item) => item !== targetDirectory)]);
+      localStorage.setItem("agent-center-directory", targetDirectory);
+      markSessionRead(session);
+      setNewTaskOpen(false);
+      setSidebarOpen(false);
+
+      const [agentsResult, modelsResult, recentModelResult] = await Promise.allSettled([
         listAgents(taskConnection),
         listModels(taskConnection),
         findRecentSuccessfulModel(taskConnection),
       ]);
-      setConnection(taskConnection);
-      setDirectory(targetDirectory);
-      setSessions([session]);
-      setMessages((current) => ({ ...current, [session.id]: [] }));
-      setActiveID(session.id);
-      setAgents(nextAgents);
-      setModels(nextModels);
+      const nextAgents = agentsResult.status === "fulfilled" ? agentsResult.value : agents;
+      const nextModels = modelsResult.status === "fulfilled" ? modelsResult.value : models;
+      const recentSuccessfulModel = recentModelResult.status === "fulfilled" ? recentModelResult.value : null;
+      if (agentsResult.status === "fulfilled") setAgents(nextAgents);
+      if (modelsResult.status === "fulfilled") setModels(nextModels);
       const nextAgent = nextAgents.find((agent) => agent.name === "build") || nextAgents[0];
       const nextModel = nextModels.find((model) =>
         model.providerID === preferredModel?.providerID && model.modelID === preferredModel.modelID,
@@ -993,11 +1003,6 @@ export default function App() {
       ) || nextModels.find((model) => model.isDefault) || nextModels[0] || null;
       setSelectedModel(nextModel);
       setSelectedAgent(nextAgent?.name || "build");
-      setRecentDirectories((current) => [targetDirectory, ...current.filter((item) => item !== targetDirectory)]);
-      localStorage.setItem("agent-center-directory", targetDirectory);
-      markSessionRead(session);
-      setNewTaskOpen(false);
-      setSidebarOpen(false);
     } catch (error) {
       setNewTaskError(error instanceof Error ? error.message : "Could not create a session.");
     } finally {
