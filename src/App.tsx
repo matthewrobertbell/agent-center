@@ -1,4 +1,5 @@
-import { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import type { Part, Session } from "@opencode-ai/sdk/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -32,6 +33,11 @@ const PINNED_SESSIONS_KEY = "agent-center-pinned-sessions";
 const THEME_KEY = "agent-center-theme";
 const GROUP_MODE_KEY = "agent-center-group-mode";
 const READ_SESSIONS_KEY = "agent-center-read-sessions";
+const MANUALLY_UNREAD_SESSIONS_KEY = "agent-center-manually-unread-sessions";
+const SIDEBAR_WIDTH_KEY = "agent-center-sidebar-width";
+const DEFAULT_SIDEBAR_WIDTH = 252;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 420;
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
@@ -67,6 +73,15 @@ function loadPinnedSessionIDs() {
   }
 }
 
+function loadManuallyUnreadSessionIDs() {
+  try {
+    const value = JSON.parse(localStorage.getItem(MANUALLY_UNREAD_SESSIONS_KEY) || "[]");
+    return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function loadGroupMode(): GroupMode {
   return localStorage.getItem(GROUP_MODE_KEY) === "project" ? "project" : "date";
 }
@@ -78,6 +93,15 @@ function loadReadSessionUpdates(): Record<string, number> {
   } catch {
     return {};
   }
+}
+
+function loadSidebarWidth() {
+  const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+  if (!stored) return DEFAULT_SIDEBAR_WIDTH;
+  const saved = Number(stored);
+  return Number.isFinite(saved)
+    ? Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, saved))
+    : DEFAULT_SIDEBAR_WIDTH;
 }
 
 function timeLabel(timestamp: number) {
@@ -549,11 +573,14 @@ function Message({ message }: { message: ThreadMessage }) {
 export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(loadThemeMode);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [groupMode, setGroupMode] = useState<GroupMode>(loadGroupMode);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [pinnedSessionIDs, setPinnedSessionIDs] = useState<string[]>(loadPinnedSessionIDs);
   const [readSessionUpdates, setReadSessionUpdates] = useState<Record<string, number>>(loadReadSessionUpdates);
+  const [manuallyUnreadSessionIDs, setManuallyUnreadSessionIDs] = useState<string[]>(loadManuallyUnreadSessionIDs);
   const [busySessionIDs, setBusySessionIDs] = useState<string[]>([]);
   const [locallySendingSessionIDs, setLocallySendingSessionIDs] = useState<string[]>([]);
   const [activeID, setActiveID] = useState("");
@@ -631,6 +658,20 @@ export default function App() {
     };
     return collect(session);
   };
+  const rootSession = (session: Session) => {
+    let root = session;
+    const seen = new Set([session.id]);
+    while (root.parentID) {
+      const parent = sessionsByID.get(root.parentID);
+      if (!parent || seen.has(parent.id)) break;
+      seen.add(parent.id);
+      root = parent;
+    }
+    return root;
+  };
+  const sessionIsUnread = (session: Session) =>
+    manuallyUnreadSessionIDs.includes(session.id)
+    || (session.id !== activeSession?.id && session.time.updated > (readSessionUpdates[session.id] || 0));
   const sessionActivity = (session: Session) => {
     const family = sessionFamily(session);
     const busy = family.some((item) =>
@@ -638,11 +679,18 @@ export default function App() {
       || locallySendingSessionIDs.includes(item.id)
       || stoppingSessionID === item.id,
     );
-    const unread = !busy && family.some((item) =>
-      item.id !== activeSession?.id && item.time.updated > (readSessionUpdates[item.id] || 0),
-    );
+    const parentAllowsUnread = !session.parentID || sessionIsUnread(rootSession(session));
+    const unread = !busy && parentAllowsUnread && family.some(sessionIsUnread);
     return { busy, unread };
   };
+  const topLevelTaskCounts = sessions
+    .filter((session) => !session.parentID)
+    .reduce((counts, session) => {
+      const activity = sessionActivity(session);
+      if (activity.busy) counts.inProgress += 1;
+      else if (activity.unread) counts.unread += 1;
+      return counts;
+    }, { inProgress: 0, unread: 0 });
   const automaticModel = useMemo(() => {
     const agentModel = agents.find((agent) => agent.name === selectedAgent)?.model;
     if (agentModel) {
@@ -714,6 +762,14 @@ export default function App() {
   }, [activeSession?.id]);
 
   useEffect(() => {
+    const statuses = [
+      topLevelTaskCounts.inProgress > 0 ? `⏳${topLevelTaskCounts.inProgress}` : "",
+      topLevelTaskCounts.unread > 0 ? `🔔${topLevelTaskCounts.unread}` : "",
+    ].filter(Boolean);
+    document.title = statuses.length > 0 ? `${statuses.join(" ")} | Agent Center` : "Agent Center";
+  }, [topLevelTaskCounts.inProgress, topLevelTaskCounts.unread]);
+
+  useEffect(() => {
     function closeAgentMenu(event: PointerEvent) {
       if (!agentControlRef.current?.contains(event.target as Node)) setAgentMenuOpen(false);
       if (!modelControlRef.current?.contains(event.target as Node)) setModelMenuOpen(false);
@@ -766,7 +822,7 @@ export default function App() {
           .map(([sessionID]) => sessionID));
         setSessions(nextSessions);
         const active = nextSessions.find((session) => session.id === activeID);
-        if (active) markSessionRead(active);
+        if (active) markSessionRead(active, true);
       } catch {
         // Keep the current sidebar stable during a transient polling failure.
       } finally {
@@ -811,11 +867,36 @@ export default function App() {
     };
   }, [connection, activeSession?.id, activeSession?.directory]);
 
-  function markSessionRead(session: Session) {
+  function markSessionRead(session: Session, preserveManualUnread = false) {
+    const readableSessions = session.parentID ? [session] : sessionFamily(session);
     setReadSessionUpdates((current) => {
-      if ((current[session.id] || 0) >= session.time.updated) return current;
-      const next = { ...current, [session.id]: session.time.updated };
+      let changed = false;
+      const next = { ...current };
+      readableSessions.forEach((item) => {
+        if ((next[item.id] || 0) >= item.time.updated) return;
+        next[item.id] = item.time.updated;
+        changed = true;
+      });
+      if (!changed) return current;
       localStorage.setItem(READ_SESSIONS_KEY, JSON.stringify(next));
+      return next;
+    });
+    if (!preserveManualUnread) {
+      const readableSessionIDs = new Set(readableSessions.map((item) => item.id));
+      setManuallyUnreadSessionIDs((current) => {
+        const next = current.filter((sessionID) => !readableSessionIDs.has(sessionID));
+        if (next.length === current.length) return current;
+        localStorage.setItem(MANUALLY_UNREAD_SESSIONS_KEY, JSON.stringify(next));
+        return next;
+      });
+    }
+  }
+
+  function markSessionUnread(session: Session) {
+    setManuallyUnreadSessionIDs((current) => {
+      if (current.includes(session.id)) return current;
+      const next = [...current, session.id];
+      localStorage.setItem(MANUALLY_UNREAD_SESSIONS_KEY, JSON.stringify(next));
       return next;
     });
   }
@@ -936,6 +1017,42 @@ export default function App() {
     }
   }
 
+  function updateSidebarWidth(nextWidth: number) {
+    const width = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(nextWidth)));
+    setSidebarWidth(width);
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+  }
+
+  function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    document.body.classList.add("is-resizing-sidebar");
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      updateSidebarWidth(startWidth + pointerEvent.clientX - startX);
+    };
+    const stopResize = () => {
+      document.body.classList.remove("is-resizing-sidebar");
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", stopResize);
+      document.removeEventListener("pointercancel", stopResize);
+    };
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", stopResize);
+    document.addEventListener("pointercancel", stopResize);
+  }
+
+  function handleSidebarResizeKey(event: KeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? 32 : 12;
+    if (event.key === "ArrowLeft") updateSidebarWidth(sidebarWidth - step);
+    else if (event.key === "ArrowRight") updateSidebarWidth(sidebarWidth + step);
+    else if (event.key === "Home") updateSidebarWidth(MIN_SIDEBAR_WIDTH);
+    else if (event.key === "End") updateSidebarWidth(MAX_SIDEBAR_WIDTH);
+    else return;
+    event.preventDefault();
+  }
+
   function showNewTaskPicker() {
     if (!connection) {
       setConnectionError(`Connect to an OpenCode server before creating a task.`);
@@ -943,6 +1060,7 @@ export default function App() {
       return;
     }
     setDirectoryOpen(false);
+    setSearchOpen(false);
     setNewTaskDirectory(activeSession?.directory || connection.options.directory || recentDirectories[0] || "");
     setNewTaskError("");
     setNewTaskOpen((open) => !open);
@@ -1017,8 +1135,19 @@ export default function App() {
 
   function showDirectoryPicker() {
     setNewTaskOpen(false);
+    setSearchOpen(false);
+    if (directoryOpen) {
+      setDirectoryOpen(false);
+      return;
+    }
     setDirectoryDraft(connection?.options.directory || activeSession?.directory || "");
     setDirectoryOpen(true);
+  }
+
+  function toggleSearch() {
+    setNewTaskOpen(false);
+    setDirectoryOpen(false);
+    setSearchOpen((open) => !open);
   }
 
   async function openDirectory(nextDirectory: string) {
@@ -1129,6 +1258,11 @@ export default function App() {
       setMessages((current) => {
         const next = { ...current };
         familyIDs.forEach((sessionID) => delete next[sessionID]);
+        return next;
+      });
+      setManuallyUnreadSessionIDs((current) => {
+        const next = current.filter((sessionID) => !familyIDs.has(sessionID));
+        localStorage.setItem(MANUALLY_UNREAD_SESSIONS_KEY, JSON.stringify(next));
         return next;
       });
       setPinnedSessionIDs((current) => {
@@ -1482,7 +1616,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)} />}
       <aside className={`thread-sidebar ${sidebarOpen ? "is-open" : ""}`}>
         <div className="sidebar-top">
@@ -1512,9 +1646,15 @@ export default function App() {
             </button>
           </div>
           <div className="new-task-row">
-            <button className="new-task-button" onClick={showNewTaskPicker} disabled={connectionState !== "connected"} aria-expanded={newTaskOpen}>
-              <i className="bi bi-plus-lg" />
-              <span>New task</span>
+            <button
+              className="new-task-button"
+              onClick={showNewTaskPicker}
+              disabled={connectionState !== "connected"}
+              aria-label="New task"
+              aria-expanded={newTaskOpen}
+              title="New task"
+            >
+              <i className="bi bi-plus-lg" aria-hidden="true" />
             </button>
             <button
               className="open-directory-button"
@@ -1525,6 +1665,16 @@ export default function App() {
               title="Open directory"
             >
               <i className="bi bi-folder2-open" aria-hidden="true" />
+            </button>
+            <button
+              className="open-directory-button"
+              onClick={toggleSearch}
+              aria-label={searchOpen ? "Close task search" : "Search tasks"}
+              aria-expanded={searchOpen}
+              data-active={Boolean(search)}
+              title="Search tasks"
+            >
+              <i className="bi bi-search" aria-hidden="true" />
             </button>
           </div>
           {newTaskOpen && (
@@ -1583,7 +1733,6 @@ export default function App() {
               </div>
               {recentDirectories.length > 0 && (
                 <div className="recent-projects open-directory-projects" aria-label="Recent projects">
-                  <span>Recent projects</span>
                   <div className="recent-project-list">
                     {recentDirectories.slice(0, 20).map((recentDirectory) => (
                       <button
@@ -1619,17 +1768,29 @@ export default function App() {
               <datalist id="known-project-directories">
                 {knownDirectories.map((knownDirectory) => <option value={knownDirectory} key={knownDirectory} />)}
               </datalist>
-              <div className="directory-picker-actions">
-                <button type="button" onClick={() => setDirectoryDraft("")}>All projects</button>
+              <div className="directory-picker-actions justify-content-end">
                 <button type="submit">Open</button>
               </div>
             </form>
           )}
-          <label className="thread-search">
-            <i className="bi bi-search" aria-hidden="true" />
-            <span className="visually-hidden">Search threads</span>
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search tasks" />
-          </label>
+          {searchOpen && (
+            <label className="thread-search">
+              <i className="bi bi-search" aria-hidden="true" />
+              <span className="visually-hidden">Search threads</span>
+              <input
+                autoFocus
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setSearchOpen(false);
+                  }
+                }}
+                placeholder="Search tasks"
+              />
+            </label>
+          )}
           <div className="group-switch" role="group" aria-label="Group tasks by">
             <button aria-pressed={groupMode === "date"} onClick={() => setGroupMode("date")}>
               <i className="bi bi-calendar3" aria-hidden="true" /> Date
@@ -1702,6 +1863,18 @@ export default function App() {
             <i className="bi bi-chevron-up" />
           </button>
         </div>
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-label="Resize task sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={sidebarWidth}
+          tabIndex={0}
+          onPointerDown={startSidebarResize}
+          onKeyDown={handleSidebarResizeKey}
+        />
       </aside>
 
       <main className="workspace">
@@ -1724,15 +1897,28 @@ export default function App() {
               : activeSession && <span className="task-path">{activeSession.directory}</span>}
           </div>
           {activeSession && !activeSession.parentID && (
-            <button
-              className={`header-action ${pinnedSessionIDs.includes(activeSession.id) ? "is-pinned" : ""}`}
-              title={pinnedSessionIDs.includes(activeSession.id) ? "Unpin task" : "Pin task"}
-              aria-label={pinnedSessionIDs.includes(activeSession.id) ? "Unpin current task" : "Pin current task"}
-              aria-pressed={pinnedSessionIDs.includes(activeSession.id)}
-              onClick={() => togglePinned(activeSession.id)}
-            >
-              <i className={`bi ${pinnedSessionIDs.includes(activeSession.id) ? "bi-pin-angle-fill" : "bi-pin-angle"}`} />
-            </button>
+            <div className="workspace-actions">
+              <button
+                className={`header-action ${manuallyUnreadSessionIDs.includes(activeSession.id) ? "is-unread" : ""}`}
+                title={manuallyUnreadSessionIDs.includes(activeSession.id) ? "Mark task as read" : "Mark task as unread"}
+                aria-label={manuallyUnreadSessionIDs.includes(activeSession.id) ? "Mark current task as read" : "Mark current task as unread"}
+                aria-pressed={manuallyUnreadSessionIDs.includes(activeSession.id)}
+                onClick={() => manuallyUnreadSessionIDs.includes(activeSession.id)
+                  ? markSessionRead(activeSession)
+                  : markSessionUnread(activeSession)}
+              >
+                <i className={`bi ${manuallyUnreadSessionIDs.includes(activeSession.id) ? "bi-envelope-fill" : "bi-envelope"}`} aria-hidden="true" />
+              </button>
+              <button
+                className={`header-action ${pinnedSessionIDs.includes(activeSession.id) ? "is-pinned" : ""}`}
+                title={pinnedSessionIDs.includes(activeSession.id) ? "Unpin task" : "Pin task"}
+                aria-label={pinnedSessionIDs.includes(activeSession.id) ? "Unpin current task" : "Pin current task"}
+                aria-pressed={pinnedSessionIDs.includes(activeSession.id)}
+                onClick={() => togglePinned(activeSession.id)}
+              >
+                <i className={`bi ${pinnedSessionIDs.includes(activeSession.id) ? "bi-pin-angle-fill" : "bi-pin-angle"}`} />
+              </button>
+            </div>
           )}
         </header>
 
