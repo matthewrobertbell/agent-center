@@ -42,6 +42,11 @@ export type ModelOption = {
   isDefault: boolean;
 };
 
+export type RecentModelUsage = Pick<ModelOption, "providerID" | "modelID"> & {
+  uses: number;
+  lastUsed: number;
+};
+
 export type PromptAttachment = {
   id: string;
   name: string;
@@ -329,6 +334,48 @@ export async function findRecentSuccessfulModel(
     // Fall back to the connected provider defaults when history is unavailable.
   }
   return null;
+}
+
+export async function listRecentModelUsage(
+  connection: OpenCodeConnection,
+  sessions: Session[],
+  since = Date.now() - 3 * 24 * 60 * 60 * 1000,
+  limit = 12,
+): Promise<RecentModelUsage[]> {
+  const recentSessions = sessions.filter((session) => session.time.updated >= since);
+  const usage = new Map<string, RecentModelUsage>();
+  const batchSize = 6;
+
+  for (let offset = 0; offset < recentSessions.length; offset += batchSize) {
+    const batch = recentSessions.slice(offset, offset + batchSize);
+    const results = await Promise.allSettled(
+      batch.map((session) => listMessages(connection, session.id, session.directory)),
+    );
+    results.forEach((result) => {
+      if (result.status !== "fulfilled") return;
+      result.value.forEach((message) => {
+        if (
+          message.role !== "assistant"
+          || message.error
+          || !message.provider
+          || !message.model
+          || message.created < since
+        ) return;
+        const key = `${message.provider}\u0000${message.model}`;
+        const current = usage.get(key);
+        usage.set(key, {
+          providerID: message.provider,
+          modelID: message.model,
+          uses: (current?.uses || 0) + 1,
+          lastUsed: Math.max(current?.lastUsed || 0, message.created),
+        });
+      });
+    });
+  }
+
+  return Array.from(usage.values())
+    .sort((a, b) => b.uses - a.uses || b.lastUsed - a.lastUsed)
+    .slice(0, Math.max(0, limit));
 }
 
 function sessionErrorMessage(error: unknown): string | undefined {

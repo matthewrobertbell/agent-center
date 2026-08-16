@@ -12,6 +12,7 @@ import {
   listAgents,
   listMessages,
   listModels,
+  listRecentModelUsage,
   listRecentProjectDirectories,
   listSessionStatuses,
   listSessions,
@@ -21,6 +22,7 @@ import {
   type ModelOption,
   type OpenCodeConnection,
   type PromptAttachment,
+  type RecentModelUsage,
   type ThreadMessage,
 } from "./opencode";
 
@@ -142,6 +144,10 @@ function subagentName(title: string) {
 
 function displayAgentName(name: string) {
   return name.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function modelKey(model: Pick<ModelOption, "providerID" | "modelID">) {
+  return `${model.providerID}\u0000${model.modelID}`;
 }
 
 function fileSizeLabel(bytes: number) {
@@ -592,6 +598,7 @@ export default function App() {
   const [newTaskDirectory, setNewTaskDirectory] = useState("");
   const [newTaskError, setNewTaskError] = useState("");
   const [creatingSession, setCreatingSession] = useState(false);
+  const [creatingProjectDirectory, setCreatingProjectDirectory] = useState("");
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [directoryDraft, setDirectoryDraft] = useState("");
   const [serverUrl, setServerUrl] = useState(() => localStorage.getItem("agent-center-url") || DEFAULT_URL);
@@ -612,6 +619,7 @@ export default function App() {
   const [selectedAgent, setSelectedAgent] = useState("");
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [recentModelUsage, setRecentModelUsage] = useState<RecentModelUsage[]>([]);
   const [selectedModel, setSelectedModel] = useState<ModelOption | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
@@ -622,6 +630,7 @@ export default function App() {
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const agentControlRef = useRef<HTMLDivElement>(null);
   const modelControlRef = useRef<HTMLDivElement>(null);
+  const recentModelUsageRequest = useRef(0);
   const autoConnectStarted = useRef(false);
   const intentionallyStoppedSessionIDs = useRef(new Set<string>());
   const sendingSessionIDs = useRef(new Set<string>());
@@ -745,13 +754,26 @@ export default function App() {
     return { pinned, groups: groupList };
   }, [sessions, search, pinnedSessionIDs, groupMode, childSessionsByParent]);
 
+  const recentModelUsageByKey = useMemo(
+    () => new Map(recentModelUsage.map((usage) => [modelKey(usage), usage])),
+    [recentModelUsage],
+  );
+  const favoriteModelOptions = useMemo(() => {
+    const favorites: Array<{ model: ModelOption; usage: RecentModelUsage }> = [];
+    recentModelUsage.forEach((usage) => {
+      const model = models.find((option) => modelKey(option) === modelKey(usage));
+      if (model) favorites.push({ model, usage });
+    });
+    return favorites.slice(0, 3);
+  }, [models, recentModelUsage]);
   const filteredModels = useMemo(() => {
     const query = modelSearch.trim().toLowerCase();
-    const matching = query
-      ? models.filter((model) => `${model.name} ${model.modelID} ${model.providerName}`.toLowerCase().includes(query))
-      : models;
+    const matching = models.filter((model) =>
+      (!query || `${model.name} ${model.modelID} ${model.providerName}`.toLowerCase().includes(query))
+      && (query || !recentModelUsageByKey.has(modelKey(model))),
+    );
     return matching.slice(0, 80);
-  }, [models, modelSearch]);
+  }, [models, modelSearch, recentModelUsageByKey]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -932,8 +954,10 @@ export default function App() {
     nextPassword: string,
     openOnFailure = false,
   ) {
+    const modelUsageRequestID = ++recentModelUsageRequest.current;
     setConnectionState("connecting");
     setConnectionError("");
+    setRecentModelUsage([]);
     try {
       const nextConnection = createConnection({
         baseUrl: nextServerUrl,
@@ -963,6 +987,13 @@ export default function App() {
       });
       setAgents(nextAgents);
       setModels(nextModels);
+      void listRecentModelUsage(nextConnection, nextSessions)
+        .then((usage) => {
+          if (recentModelUsageRequest.current === modelUsageRequestID) setRecentModelUsage(usage);
+        })
+        .catch(() => {
+          // Model history is an enhancement; the full picker remains available without it.
+        });
       setRecentDirectories(nextDirectories);
       setSelectedModel(null);
       setModelSearch("");
@@ -995,6 +1026,7 @@ export default function App() {
       setActiveID("");
       setAgents([]);
       setModels([]);
+      setRecentModelUsage([]);
       setBusySessionIDs([]);
       setSelectedAgent("");
       setSelectedModel(null);
@@ -1066,16 +1098,16 @@ export default function App() {
     setNewTaskOpen((open) => !open);
   }
 
-  async function handleNewSession(nextDirectory: string) {
+  async function handleNewSession(nextDirectory: string): Promise<boolean> {
     if (!connection) {
       setConnectionError(`Connect to an OpenCode server before creating a task.`);
       setConnectionOpen(true);
-      return;
+      return false;
     }
     const targetDirectory = nextDirectory.trim();
     if (!targetDirectory) {
       setNewTaskError("Enter a project path.");
-      return;
+      return false;
     }
     setCreatingSession(true);
     setNewTaskError("");
@@ -1121,10 +1153,25 @@ export default function App() {
       ) || nextModels.find((model) => model.isDefault) || nextModels[0] || null;
       setSelectedModel(nextModel);
       setSelectedAgent(nextAgent?.name || "build");
+      return true;
     } catch (error) {
       setNewTaskError(error instanceof Error ? error.message : "Could not create a session.");
+      return false;
     } finally {
       setCreatingSession(false);
+    }
+  }
+
+  async function handleProjectNewSession(projectDirectory: string) {
+    setCreatingProjectDirectory(projectDirectory);
+    try {
+      const created = await handleNewSession(projectDirectory);
+      if (!created) {
+        setNewTaskDirectory(projectDirectory);
+        setNewTaskOpen(true);
+      }
+    } finally {
+      setCreatingProjectDirectory("");
     }
   }
 
@@ -1436,6 +1483,33 @@ export default function App() {
     }
   }
 
+  function renderModelOption(model: ModelOption, favoriteUsage?: RecentModelUsage) {
+    const selected = selectedModel?.providerID === model.providerID && selectedModel.modelID === model.modelID;
+    const usageLabel = favoriteUsage
+      ? `${favoriteUsage.uses} ${favoriteUsage.uses === 1 ? "use" : "uses"} in 3d`
+      : "";
+    return (
+      <button
+        className={`model-option ${favoriteUsage ? "is-favorite" : ""}`}
+        role="option"
+        aria-selected={selected}
+        key={modelKey(model)}
+        onClick={() => { setSelectedModel(model); setModelMenuOpen(false); setModelSearch(""); }}
+      >
+        <span className="model-option-icon">
+          <i className={selected ? "bi bi-check2" : favoriteUsage ? "bi bi-star-fill" : "bi bi-cpu"} />
+        </span>
+        <span>
+          <strong>{model.name}</strong>
+          <small>
+            {model.providerName}
+            {favoriteUsage ? ` · Favorite · ${usageLabel}` : model.isDefault ? " · Provider default" : ""}
+          </small>
+        </span>
+      </button>
+    );
+  }
+
   function taskIndicator(session: Session) {
     const { busy, unread } = sessionActivity(session);
     if (!busy && !unread) return null;
@@ -1655,6 +1729,7 @@ export default function App() {
               title="New task"
             >
               <i className="bi bi-plus-lg" aria-hidden="true" />
+              <span className="new-task-label">New task</span>
             </button>
             <button
               className="open-directory-button"
@@ -1810,7 +1885,20 @@ export default function App() {
           )}
           {groupedSessions.groups.map((group) => (
             <section className={`thread-group ${groupMode === "project" ? "project-group" : ""}`} key={group.key}>
-              <h2 title={groupMode === "project" ? group.key : undefined}>{group.label}</h2>
+              <div className="thread-group-heading">
+                <h2 title={groupMode === "project" ? group.key : undefined}>{group.label}</h2>
+                {groupMode === "project" && (
+                  <button
+                    className={`project-new-task ${creatingProjectDirectory === group.key ? "is-loading" : ""}`}
+                    onClick={() => void handleProjectNewSession(group.key)}
+                    disabled={creatingSession}
+                    aria-label={`New task in ${group.label}`}
+                    title={`New task in ${group.label}`}
+                  >
+                    <i className={`bi ${creatingProjectDirectory === group.key ? "bi-arrow-repeat" : "bi-plus-lg"}`} aria-hidden="true" />
+                  </button>
+                )}
+              </div>
               {group.items.map((session) => renderSessionTree(session, false))}
             </section>
           ))}
@@ -2123,6 +2211,7 @@ export default function App() {
                       />
                     </label>
                     <div className="model-options" role="listbox" aria-label="Available models">
+                      {!modelSearch && favoriteModelOptions.map(({ model, usage }) => renderModelOption(model, usage))}
                       <button
                         className="model-option"
                         role="option"
@@ -2135,24 +2224,7 @@ export default function App() {
                           <small>{automaticModel ? `${automaticModel.providerName} · Automatic` : "Use the server configuration"}</small>
                         </span>
                       </button>
-                      {filteredModels.map((model) => {
-                        const selected = selectedModel?.providerID === model.providerID && selectedModel.modelID === model.modelID;
-                        return (
-                          <button
-                            className="model-option"
-                            role="option"
-                            aria-selected={selected}
-                            key={`${model.providerID}/${model.modelID}`}
-                            onClick={() => { setSelectedModel(model); setModelMenuOpen(false); setModelSearch(""); }}
-                          >
-                            <span className="model-option-icon"><i className={selected ? "bi bi-check2" : "bi bi-cpu"} /></span>
-                            <span>
-                              <strong>{model.name}</strong>
-                              <small>{model.providerName}{model.isDefault ? " · Provider default" : ""}</small>
-                            </span>
-                          </button>
-                        );
-                      })}
+                      {filteredModels.map((model) => renderModelOption(model, recentModelUsageByKey.get(modelKey(model))))}
                     </div>
                     <div className="model-menu-footnote">
                       {modelSearch ? `${Math.min(filteredModels.length, 80)} matching models` : `${models.length} models from connected providers`}
