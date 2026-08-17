@@ -234,7 +234,6 @@ export async function listModels(connection: OpenCodeConnection): Promise<ModelO
 
 export async function createSession(connection: OpenCodeConnection, directory?: string): Promise<Session> {
   const response = await connection.client.session.create({
-    body: { title: "New agent task" },
     query: { directory: directory || connection.options.directory || undefined },
     throwOnError: true,
   });
