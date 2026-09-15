@@ -14,6 +14,7 @@ The project is designed for developers who keep several agent tasks active at on
 - Direct task prompting through the official OpenCode TypeScript SDK
 - Agent and model selectors populated from the connected OpenCode server
 - Markdown, tables, code blocks, tool calls, reasoning, todos, attachments, and timing information
+- Completed turns collapse their reasoning and tool history into a clickable “Worked for …” summary, keeping the final answer visible
 - Image attachment by file selection or clipboard paste
 - Expandable subagent trees in the sidebar and parent conversations, with direct transcript navigation
 - Stop control for active tasks

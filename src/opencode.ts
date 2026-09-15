@@ -20,6 +20,7 @@ export type ThreadMessage = {
   role: "user" | "assistant";
   created: number;
   completed?: number;
+  finish?: string;
   agent?: string;
   provider?: string;
   model?: string;
@@ -295,6 +296,7 @@ export async function listMessages(
     role: info.role,
     created: info.time.created,
     completed: info.role === "assistant" ? info.time.completed : undefined,
+    finish: info.role === "assistant" ? info.finish : undefined,
     agent: info.role === "user" ? info.agent : info.mode,
     provider: info.role === "user" ? info.model.providerID : info.providerID,
     model: info.role === "user" ? info.model.modelID : info.modelID,

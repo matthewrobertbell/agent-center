@@ -422,6 +422,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .model-label { border: 1px solid var(--border); padding: 2px 5px; border-radius: 4px; color: var(--muted); font-size: 8.5px; }
 .turn-duration { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 .turn-duration i { font-size: 8px; }
+.turn-work { margin: 2px 0 12px; }
+.turn-work > summary { display: inline-flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: 11px; cursor: pointer; list-style: none; font-variant-numeric: tabular-nums; }
+.turn-work > summary::-webkit-details-marker { display: none; }
+.turn-work > summary:hover { color: var(--text); }
+.turn-work > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+.turn-work > summary > i { font-size: 9px; transition: transform 150ms ease-out; }
+.turn-work[open] > summary > i { transform: rotate(90deg); }
+.turn-work-content { padding: 6px 0 10px; }
 
 .message-user { width: min(88%, 650px); margin-left: auto; padding: 11px 13px 12px; background: var(--user-message); border: 1px solid var(--user-message-border); border-radius: 10px; }
 .message-user .message-meta { margin-bottom: 5px; }

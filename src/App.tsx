@@ -180,7 +180,7 @@ function textFromParts(parts: Part[]) {
 
 function messageListRevision(messages: ThreadMessage[]) {
   const last = messages[messages.length - 1];
-  return `${messages.length}:${last?.id || ""}:${last?.completed || ""}:${last?.provider || ""}:${last?.model || ""}:${last?.error || ""}:${last ? JSON.stringify(last.parts) : ""}`;
+  return `${messages.length}:${last?.id || ""}:${last?.completed || ""}:${last?.finish || ""}:${last?.provider || ""}:${last?.model || ""}:${last?.error || ""}:${last ? JSON.stringify(last.parts) : ""}`;
 }
 
 type ToolPart = Extract<Part, { type: "tool" }>;
@@ -403,22 +403,34 @@ function ToolGroup({ tools }: { tools: ToolPart[] }) {
   );
 }
 
+type ConversationTurn = ThreadMessage & { finalResponsePartIDs?: string[] };
+
 function combineConversationTurns(messages: ThreadMessage[]) {
-  return messages.reduce<ThreadMessage[]>((turns, message) => {
+  return messages.reduce<ConversationTurn[]>((turns, message) => {
+    const hasFinalResponse = message.role === "assistant"
+      && Boolean(message.completed)
+      && !message.error
+      && (message.finish === "stop" || message.finish === "length"
+        || (!message.finish && !message.parts.some((part) => part.type === "tool")))
+      && message.parts.some((part) => part.type === "text" && !part.ignored && part.text.trim());
+    const finalResponsePartIDs = hasFinalResponse
+      ? message.parts.filter((part) => part.type === "text" || part.type === "file").map((part) => part.id)
+      : undefined;
     const previous = turns[turns.length - 1];
     const sameAssistantTurn = message.role === "assistant"
       && previous?.role === "assistant"
       && previous.provider === message.provider
       && previous.model === message.model
       && previous.agent === message.agent;
-    if (!sameAssistantTurn) return [...turns, message];
+    if (!sameAssistantTurn) return [...turns, { ...message, finalResponsePartIDs }];
     const errors = Array.from(new Set([previous.error, message.error].filter(Boolean)));
     return [
       ...turns.slice(0, -1),
       {
         ...previous,
-        id: `${previous.id}:${message.id}`,
         completed: message.completed,
+        finish: message.finish,
+        finalResponsePartIDs,
         error: errors.length ? errors.join("\n") : undefined,
         parts: [...previous.parts, ...message.parts],
       },
@@ -495,7 +507,33 @@ function ReasoningBlock({ parts }: { parts: ReasoningPart[] }) {
   );
 }
 
-function Message({ message }: { message: ThreadMessage }) {
+function AssistantContent({ parts }: { parts: Part[] }) {
+  return assistantBlocks(parts).map((block) => {
+    const key = block.parts[0].id;
+    if (block.type === "reasoning") return <ReasoningBlock parts={block.parts} key={key} />;
+    if (block.type === "tools") return <ToolGroup tools={block.parts} key={key} />;
+    if (block.type === "files") return <FileChips files={block.parts} key={key} />;
+    return (
+      <div className="assistant-copy markdown-body" key={key}>
+        {block.parts.map((part) => (
+          <ReactMarkdown
+            key={part.id}
+            remarkPlugins={[remarkGfm]}
+            components={{
+              a: ({ children, ...props }) => (
+                <a {...props} target="_blank" rel="noreferrer">{children}</a>
+              ),
+            }}
+          >
+            {part.text}
+          </ReactMarkdown>
+        ))}
+      </div>
+    );
+  });
+}
+
+function Message({ message }: { message: ConversationTurn }) {
   const textParts = message.parts.filter(
     (part): part is Extract<Part, { type: "text" }> => part.type === "text" && !part.ignored,
   );
@@ -518,7 +556,10 @@ function Message({ message }: { message: ThreadMessage }) {
     );
   }
 
-  const blocks = assistantBlocks(message.parts);
+  const finalPartIDs = new Set(message.finalResponsePartIDs);
+  const workParts = message.parts.filter((part) => !finalPartIDs.has(part.id));
+  const responseParts = message.parts.filter((part) => finalPartIDs.has(part.id));
+  const hasWorkSummary = finalPartIDs.size > 0 && assistantBlocks(workParts).length > 0;
   const wasStopped = Boolean(message.error && /\baborted\b/i.test(message.error));
   const totalDuration = turnDuration(message);
 
@@ -528,34 +569,21 @@ function Message({ message }: { message: ThreadMessage }) {
         <div className="message-meta">
           <span>OpenCode</span>
           <span className="model-label">{message.model || "agent"}</span>
-          <span className="turn-duration" title="Total turn duration"><i className="bi bi-clock" aria-hidden="true" /> {totalDuration} total</span>
+          {!hasWorkSummary && <span className="turn-duration" title="Total turn duration"><i className="bi bi-clock" aria-hidden="true" /> {totalDuration} total</span>}
           <time>{timeLabel(message.created)}</time>
         </div>
-        {blocks.map((block) => {
-          const key = block.parts[0].id;
-          if (block.type === "reasoning") {
-            return <ReasoningBlock parts={block.parts} key={key} />;
-          }
-          if (block.type === "tools") return <ToolGroup tools={block.parts} key={key} />;
-          if (block.type === "files") return <FileChips files={block.parts} key={key} />;
-          return (
-            <div className="assistant-copy markdown-body" key={key}>
-              {block.parts.map((part) => (
-                <ReactMarkdown
-                  key={part.id}
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    a: ({ children, ...props }) => (
-                      <a {...props} target="_blank" rel="noreferrer">{children}</a>
-                    ),
-                  }}
-                >
-                  {part.text}
-                </ReactMarkdown>
-              ))}
-            </div>
-          );
-        })}
+        {hasWorkSummary ? (
+          <>
+            <details className="turn-work">
+              <summary>
+                <span>Worked for {totalDuration}</span>
+                <i className="bi bi-chevron-right" aria-hidden="true" />
+              </summary>
+              <div className="turn-work-content"><AssistantContent parts={workParts} /></div>
+            </details>
+            <AssistantContent parts={responseParts} />
+          </>
+        ) : <AssistantContent parts={message.parts} />}
         {wasStopped ? (
           <div className="assistant-stopped" role="status">
             <i className="bi bi-stop-circle" aria-hidden="true" />
